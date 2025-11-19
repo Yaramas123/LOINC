@@ -1,0 +1,142 @@
+import requests
+
+FHIR_BASE = "https://r4.ontoserver.csiro.au/fhir"
+SNOMED_URL = "http://snomed.info/sct"
+
+
+def fhir_get(url, params=None):
+    r = requests.get(url, params=params)
+    r.raise_for_status()
+    return r.json()
+
+
+def get_term(code):
+    url = f"{FHIR_BASE}/CodeSystem/$lookup"
+    params = {"system": SNOMED_URL, "code": code}
+    data = fhir_get(url, params)
+
+    for prop in data.get("parameter", []):
+        if prop["name"] == "display":
+            return prop["valueString"]
+    return None
+
+
+def get_parents(code):
+    url = f"{FHIR_BASE}/CodeSystem/$lookup"
+    params = {
+        "system": SNOMED_URL,
+        "code": code
+    }
+    data = fhir_get(url, params)
+
+    parents = set()  # avoid duplicates
+
+    for p in data.get("parameter", []):
+        if p["name"] != "property":
+            continue
+
+        relationship = None
+        value_code = None
+        char_type = None
+
+        for part in p.get("part", []):
+            if part["name"] == "code":
+                relationship = part.get("valueCode")
+            if part["name"] == "value":
+                value_code = part.get("valueCode")
+            if part["name"] == "valueString":
+                char_type = part.get("valueString")  # "Inferred" / "Stated"
+
+        # We want:
+        # - stated parent
+        # - inferred parent
+        # - "Is a" inferred parents
+        if relationship in ("parent", "Is a"):
+            if value_code:
+                parents.add(value_code)
+
+    # Convert to list with names
+    result = []
+    for pcode in parents:
+        result.append({
+            "code": pcode,
+            "name": get_term(pcode)
+        })
+
+    return result
+
+
+def get_children(code):
+    """
+    Get DIRECT children using an $expand with filter = is-a:<code>
+    and include=children directive.
+    """
+    url = f"{FHIR_BASE}/ValueSet/$expand"
+    params = {
+        "url": f"{SNOMED_URL}?fhir_vs=isa/{code}"
+    }
+    data = fhir_get(url, params)
+
+    children = []
+    for item in data.get("expansion", {}).get("contains", []):
+        # Skip the root concept itself
+        if item.get("code") != code:
+            children.append({
+                "code": item["code"],
+                "name": item["display"]
+            })
+
+    return children
+
+
+def get_descendants(code):
+    """All recursive descendants"""
+    # includeInactives=true returns full results
+    url = f"{FHIR_BASE}/ValueSet/$expand"
+    params = {
+        "filter": "",
+        "url": f"{SNOMED_URL}?fhir_vs=isa/{code}"
+    }
+    data = fhir_get(url, params)
+
+    desc = []
+    for item in data.get("expansion", {}).get("contains", []):
+        if item["code"] != code:
+            desc.append({"code": item["code"], "name": item["display"]})
+
+    return desc
+
+
+def print_tree(code, level=0):
+    indent = "   " * level
+    print(f"{indent}- {get_term(code)} [{code}]")
+
+    children = get_children(code)
+    for child in children:
+        print_tree(child["code"], level + 1)
+
+
+# ------------------------------------------
+# DEMO
+# ------------------------------------------
+
+if __name__ == "__main__":
+    concept = "410188000"  # concept
+
+    print("\n==== QUERY ====")
+    print("Term:", get_term(concept))
+
+    print("\n==== PARENTS ====")
+    for p in get_parents(concept):
+        print(" -", p["name"])
+
+    print("\n==== CHILDREN (FULL) ====")
+    for c in get_children(concept):
+        print(" -", c["name"])
+
+    print("\n==== DESCENDANTS (FULL) ====")
+    for d in get_descendants(concept):
+        print(" -", d["name"])
+
+    print("\n==== TREE ====")
+    print_tree(concept)
