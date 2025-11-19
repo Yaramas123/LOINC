@@ -1,0 +1,204 @@
+import requests
+import time
+
+
+class UMLSSNOMED_US:
+
+    SERVICE = "http://umlsks.nlm.nih.gov"                  # REQUIRED VALUE
+    AUTH_URL = "https://utslogin.nlm.nih.gov/cas/v1/tickets"
+    BASE = "https://uts-ws.nlm.nih.gov"
+    VERSION = "current"
+    SAB = "SNOMEDCT_US"                                    # US Edition
+
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.tgt = None
+        self.tgt_time = 0
+        self.cache = {}
+
+    # ---------------------------------------------------------
+    # AUTHENTICATION (TGT + ST)
+    # ---------------------------------------------------------
+
+    def get_tgt(self):
+        """Get a Ticket-Granting Ticket (valid ~8 hours)."""
+        if self.tgt and time.time() - self.tgt_time < 8 * 3600:
+            return self.tgt
+
+        print("Requesting UMLS TGT...")
+
+        r = requests.post(
+            self.AUTH_URL,
+            data={"apikey": self.api_key}
+        )
+        r.raise_for_status()
+
+        self.tgt = r.headers["location"]
+        self.tgt_time = time.time()
+        return self.tgt
+
+    def get_st(self):
+        """Get a new Service Ticket tied to UMLS REST API."""
+        tgt = self.get_tgt()
+
+        r = requests.post(
+            tgt,
+            data={"service": self.SERVICE}
+        )
+        r.raise_for_status()
+
+        return r.text
+
+    # ---------------------------------------------------------
+    # INTERNAL GET WITH CACHING + SERVICE TICKET
+    # ---------------------------------------------------------
+
+    def umls_get(self, url, params=None):
+        if params is None:
+            params = {}
+
+        key = (url, tuple(sorted(params.items())))
+        if key in self.cache:
+            return self.cache[key]
+
+        params["ticket"] = self.get_st()
+
+        r = requests.get(url, params=params)
+        r.raise_for_status()
+        data = r.json()
+
+        self.cache[key] = data
+        return data
+
+    # ---------------------------------------------------------
+    # FETCH CONCEPT DETAILS
+    # ---------------------------------------------------------
+
+    def get_concept(self, code):
+        url = f"{self.BASE}/rest/content/{self.VERSION}/source/{self.SAB}/{code}"
+        return self.umls_get(url)
+
+    # ---------------------------------------------------------
+    # PARENTS
+    # ---------------------------------------------------------
+
+    def get_parents(self, code):
+        url = f"{self.BASE}/rest/content/{self.VERSION}/source/{self.SAB}/{code}/parents"
+        data = self.umls_get(url)
+
+        parents = []
+        for p in data["result"]:
+            parents.append({
+                "code": p["ui"],
+                "name": p["name"]
+            })
+        return parents
+
+    # ---------------------------------------------------------
+    # CHILDREN
+    # ---------------------------------------------------------
+
+    def get_children(self, code):
+        url = f"{self.BASE}/rest/content/{self.VERSION}/source/{self.SAB}/{code}/children"
+        try:
+            data = self.umls_get(url)
+        except requests.HTTPError as e:
+            if e.response.status_code == 404:
+                return []  # no children in UMLS
+            raise
+
+        children = []
+        for c in data["result"]:
+            children.append({
+                "code": c["ui"],
+                "name": c["name"]
+            })
+        return children
+
+    # ---------------------------------------------------------
+    # ANCESTORS
+    # ---------------------------------------------------------
+
+    def get_ancestors(self, code):
+        url = f"{self.BASE}/rest/content/{self.VERSION}/source/{self.SAB}/{code}/ancestors"
+        data = self.umls_get(url)
+
+        ancestors = []
+        for a in data["result"]:
+            ancestors.append({
+                "code": a["ui"],
+                "name": a["name"]
+            })
+        return ancestors
+
+    # ---------------------------------------------------------
+    # DESCENDANTS
+    # ---------------------------------------------------------
+
+    def get_descendants(self, code):
+        url = f"{self.BASE}/rest/content/{self.VERSION}/source/{self.SAB}/{code}/descendants"
+        data = self.umls_get(url)
+
+        descendants = []
+        for d in data["result"]:
+            descendants.append({
+                "code": d["ui"],
+                "name": d["name"]
+            })
+        return descendants
+
+    # ---------------------------------------------------------
+    # FULL TREE RECURSIVE PRINT
+    # ---------------------------------------------------------
+
+    def print_tree(self, code, level=0, visited=None):
+        if visited is None:
+            visited = set()
+        if code in visited:
+            return
+        visited.add(code)
+
+        concept = self.get_concept(code)
+        name = concept["result"]["name"]
+
+        indent = "   " * level
+        print(f"{indent}- {name} [{code}]")
+
+        for child in self.get_children(code):
+            self.print_tree(child["code"], level + 1, visited)
+
+
+# ---------------------------------------------------------
+# DEMO USAGE
+# ---------------------------------------------------------
+
+if __name__ == "__main__":
+    API_KEY = "f1ab6995-7ab8-4c6a-8b7b-2f178b4f36a6"
+
+    snomed = UMLSSNOMED_US(API_KEY)
+
+    code = "410188000"  # Allergy to nut
+
+    print("\n==== QUERY ====")
+    concept = snomed.get_concept(code)
+    print("Code:", code)
+    print("Name:", concept["result"]["name"])
+
+    print("\n==== PARENTS ====")
+    for p in snomed.get_parents(code):
+        print(" -", p["name"])
+
+    print("\n==== CHILDREN ====")
+    for c in snomed.get_children(code):
+        print(" -", c["name"])
+
+    print("\n==== ANCESTORS ====")
+    for a in snomed.get_ancestors(code):
+        print(" -", a["name"])
+
+    print("\n==== DESCENDANTS ====")
+    for d in snomed.get_descendants(code):
+        print(" -", d["name"])
+
+    print("\n==== TREE ====")
+    snomed.print_tree(code)
